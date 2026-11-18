@@ -1,0 +1,17 @@
+<clickhouse>
+  <!--
+    The stock image restricts the `default` user to loopback (127.0.0.1/::1),
+    which rejects connections from the backend and order-worker containers.
+    Dedicated app user, reachable from the Compose network.
+  -->
+  <users>
+    <shopify>
+      <password>shopify</password>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <profile>default</profile>
+      <quota>default</quota>
+    </shopify>
+  </users>
+</clickhouse>
