@@ -108,7 +108,7 @@ Solo tecnologías presentes en `docker-compose.yml`.
 ├── clickhouse/users.xml    # usuario app accesible desde la red de Compose
 ├── backend/                # API HTTP, reservas, pago mock y worker de órdenes
 ├── frontend/               # React + Vite + Tailwind servido por nginx
-└── docs/adr/               # las cinco decisiones arquitectónicas
+└── docs/adr/               # las seis decisiones arquitectónicas
 ```
 
 ## Decisiones clave
@@ -119,6 +119,7 @@ Solo tecnologías presentes en `docker-compose.yml`.
 - **Pago simulado, no Stripe.** Latencia fija de 500 ms y 5 % de fallos hacen reproducibles el `pending`, el `paid` y el `failed`. Ver [ADR-0003](docs/adr/0003-pago-mock.md).
 - **Postgres manda en stock; ClickHouse solo lee eventos.** Nunca se consulta ClickHouse para decidir si se vende. Ver [ADR-0004](docs/adr/0004-stock-en-postgres.md).
 - **Sin transactional outbox.** La publicación a Kafka ocurre después del commit; en caso de crash entre ambas, el demo puede perder un evento de analítica. Ver [ADR-0005](docs/adr/0005-sin-transactional-outbox.md).
+- **Eventos autocontenidos y un partition por topic.** El evento lleva la foto de la venta y su `created_at`; el worker no consulta Postgres y el desorden entre `COMMIT` y `publish` no altera el gráfico. Ver [ADR-0006](docs/adr/0006-eventos-autocontenidos.md).
 
 ## Alcance y decisiones de diseño
 
@@ -193,3 +194,4 @@ docker compose exec clickhouse clickhouse-client --query \
 - [ADR-0003 — Pago mock en vez de Stripe](docs/adr/0003-pago-mock.md)
 - [ADR-0004 — Postgres como fuente de verdad del stock](docs/adr/0004-stock-en-postgres.md)
 - [ADR-0005 — Sin Transactional Outbox](docs/adr/0005-sin-transactional-outbox.md)
+- [ADR-0006 — Eventos autocontenidos y un partition por topic](docs/adr/0006-eventos-autocontenidos.md)
