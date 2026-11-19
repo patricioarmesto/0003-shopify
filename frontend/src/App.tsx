@@ -11,6 +11,11 @@ import {
   YAxis,
 } from 'recharts'
 
+// App.tsx es toda la UI del ejercicio. La idea didáctica es que cada panel
+// muestre una capa distinta del sistema: catálogo (Postgres + caché), checkout
+// (reserva + idempotencia), prueba de carga (concurrencia), órdenes en vivo
+// (estados) y ventas por minuto (Kafka + ClickHouse).
+
 type Product = {
   id: number
   name: string
@@ -38,6 +43,10 @@ type SalePoint = {
   revenue: number
 }
 
+// Attempt existe separado de Order porque pending y failed no son órdenes:
+// nunca llegaron a Postgres. Si se mezclaran en la misma lista, el panel
+// sugeriría que un pago rechazado generó una orden, que es justo lo que el
+// ejercicio quiere demostrar que NO pasa.
 type Attempt = {
   id: string
   productName: string
@@ -72,6 +81,8 @@ const money = (cents: number) =>
     maximumFractionDigits: 2,
   })}`
 
+// readBody tolera respuestas no JSON para que un 502 del backend no reviente
+// toda la UI con una excepción de parseo.
 async function readBody(response: Response): Promise<Record<string, unknown>> {
   try {
     return (await response.json()) as Record<string, unknown>
@@ -133,7 +144,8 @@ export default function App() {
       const response = await fetch('/api/orders')
       if (response.ok) setOrders((await response.json()) as Order[])
     } catch {
-      // ídem
+      // Las órdenes se consultan cada segundo: un fallo pasajero se corrige
+      // solo en el próximo polling, no hace falta mostrar un error.
     }
   }, [])
 
@@ -145,10 +157,13 @@ export default function App() {
         setSales(body.data ?? [])
       }
     } catch {
-      // ídem
+      // ClickHouse es asíncrono y se consulta cada 3 s: un error temporal no
+      // borra el gráfico anterior ni interrumpe el checkout.
     }
   }, [])
 
+  // Tres frecuencias distintas: el catálogo cambia poco, las órdenes son el
+  // panel "en vivo" y el gráfico depende de un pipeline asíncrono (Kafka).
   useEffect(() => {
     void fetchProducts()
     void fetchOrders()
@@ -177,6 +192,9 @@ export default function App() {
     [sales],
   )
 
+  // El panel mezcla intentos locales con órdenes confirmadas. Los intentos
+  // muestran pending/failed antes de que Postgres tenga algo que contar; las
+  // órdenes traen el total real. Se ordenan por fecha para que lo último arriba.
   const liveRows = useMemo(() => {
     const fromAttempts = attempts.map((attempt) => ({
       id: attempt.id,
@@ -226,6 +244,9 @@ export default function App() {
     }
   }
 
+  // La usa tanto el pago manual como la prueba de carga. Aceptar
+  // already_reserved es clave para el doble click: dos reservas del mismo
+  // usuario convergen en la misma clave de carrito y no descuentan dos veces.
   const reserveAndCheckout = async (
     userId: string,
     key: string,
@@ -256,6 +277,9 @@ export default function App() {
     return outcomeFrom(await readBody(checkoutResponse))
   }
 
+  // pending se inserta apenas se reservó, antes de los 500 ms del pago mock.
+  // Si el pago falla se reemplaza por failed. Así el panel muestra los tres
+  // estados aunque failed no llega nunca a la tabla orders de Postgres.
   const runCheckout = async (
     userId: string,
     key: string,
@@ -306,6 +330,8 @@ export default function App() {
     }
   }
 
+  // Prueba del middleware de idempotencia: dos requests concurrentes con la
+  // MISMA clave. Si el conteo da 2, el mutex + UNIQUE no están funcionando.
   const handleDoubleClick = async () => {
     setBusy(true)
     setNotice(null)
@@ -328,6 +354,9 @@ export default function App() {
     }
   }
 
+  // 100 usuarios en paralelo, cada uno con su propia clave. El reparto final
+  // no es fijo: el mock rechaza cerca del 5 % y esas reservas se liberan, así
+  // que "compraron + sin stock" no tiene por qué ser exactamente 10 + 90.
   const handleSimulate = async () => {
     setSimRunning(true)
     setSimResult(null)

@@ -1,8 +1,8 @@
 <clickhouse>
   <!--
-    The stock image restricts the `default` user to loopback (127.0.0.1/::1),
-    which rejects connections from the backend and order-worker containers.
-    Dedicated app user, reachable from the Compose network.
+    La imagen stock limita el usuario `default` a loopback (127.0.0.1/::1) y
+    rechaza conexiones desde los contenedores backend y order-worker. Este
+    usuario de aplicación es alcanzable desde la red de Compose.
   -->
   <users>
     <shopify>

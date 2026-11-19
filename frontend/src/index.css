@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+/* Tailwind genera las utilidades usadas en App.tsx. El tema oscuro se fija
+   acá para que no haya un flash de pantalla clara antes de cargar React. */
 :root {
   color-scheme: dark;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;

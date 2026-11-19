@@ -1,5 +1,8 @@
 name: como-funciona-0003-shopify
 
+# Ocho servicios con un solo `docker compose up`. Los healthchecks y los
+# depends_on con conditions son los que garantizan el orden: primero las bases,
+# luego la creación de topics y recién después API y worker.
 x-app-env: &app-env
   KAFKA_BROKERS: "kafka:9092"
   CLICKHOUSE_URL: "http://clickhouse:8123"
@@ -66,6 +69,9 @@ services:
       retries: 30
       start_period: 15s
 
+  # kafka-init termina y sale; la API y el worker esperan a que termine para no
+  # publicar en topics que todavía no existen. El script va en entrypoint como
+  # un único bloque: con `command` separado, bash -c sólo recibía la ruta.
   kafka-init:
     image: apache/kafka:3.8.0
     container_name: shopify-kafka-init
@@ -109,7 +115,11 @@ services:
       PORT: "8080"
       PG_DSN: "postgres://shopify:shopify@postgres:5432/shopify?sslmode=disable"
       REDIS_ADDR: "redis:6379"
+      # El reset existe sólo en desarrollo: el backend no registra la ruta
+      # /api/dev/reset si esta variable no es "true".
       ENABLE_DEV_ENDPOINTS: "true"
+    # Puertos de host desplazados para no chocar con otros ejercicios del curso.
+    # Dentro de la red de Compose se usan los puestos estándar (8080, 5432...).
     ports:
       - "8081:8080"
     depends_on:
@@ -128,6 +138,8 @@ services:
       retries: 20
       start_period: 10s
 
+  # Mismo Dockerfile que la API, otro proceso. Separarlo permite que un pico
+  # de checkout no compita con el consumo de Kafka por los mismos goroutines.
   order-worker:
     build: ./backend
     container_name: shopify-order-worker

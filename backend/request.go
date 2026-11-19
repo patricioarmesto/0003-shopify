@@ -1,6 +1,10 @@
 package main
 
-// CartRequest is the shared payload for reserving and checking out a cart line.
+// request.go evita que reserva y checkout tengan dos structs distintos con los
+// mismos tres campos. Si el día de mañana se agrega un campo, hay un solo lugar
+// que cambiar y ambos endpoints siguen interpretando el mismo JSON.
+
+// CartRequest es el payload compartido por la reserva y el checkout.
 type CartRequest struct {
 	UserID    string `json:"user_id"`
 	ProductID int    `json:"product_id"`
@@ -14,7 +18,9 @@ func (r CartRequest) validationError() string {
 	return ""
 }
 
-// cartRef bundles the two values that identify one reservation everywhere.
+// cartRef junta los dos valores que identifican una reserva. Antes viajaban
+// sueltos por cuatro firmas distintas; agruparlos evita mezclar userID con
+// productID al pasarlos de un archivo a otro.
 type cartRef struct {
 	userID    string
 	productID int

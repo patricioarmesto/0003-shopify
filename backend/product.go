@@ -8,8 +8,12 @@ import (
 	"net/http"
 )
 
-// Product is the read model served to the storefront. Stock comes from
-// Postgres; Redis only caches this projection for 30 seconds.
+// product.go expone el catálogo y es la única ventana de la UI al stock.
+// Postgres manda: Redis guarda una copia por 30 segundos para no golpear la base
+// en cada refresco, pero nadie decide vender leyendo esa copia.
+
+// Product es la proyección que consume la tienda. El stock sale de Postgres;
+// Redis sólo cachea esta vista durante 30 segundos.
 type Product struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
@@ -84,8 +88,8 @@ func (a *App) invalidateProductsCache(ctx context.Context) {
 	}
 }
 
-// getStock is used as the reservation ceiling. Postgres is the source of
-// truth; Redis never invents capacity.
+// getStock se usa como techo de la reserva. Postgres es la fuente de verdad;
+// Redis nunca inventa capacidad.
 func (a *App) getStock(ctx context.Context, productID int) (int, error) {
 	var stock int
 	err := a.db.QueryRowContext(ctx, `SELECT stock FROM products WHERE id = $1`, productID).Scan(&stock)
@@ -103,9 +107,10 @@ func (a *App) getReservation(ctx context.Context, ref cartRef) (int, error) {
 	return value, nil
 }
 
-// resetStock is a dev-only helper so the 100-user experiment can be repeated
-// without recreating the whole stack. The route is registered only when
-// ENABLE_DEV_ENDPOINTS=true.
+// resetStock es un helper de desarrollo para repetir el experimento de los 100
+// usuarios sin reconstruir el stack. La ruta sólo se registra cuando
+// ENABLE_DEV_ENDPOINTS=true: en producción no existe, no responde 403, directamente
+// no está en el mux.
 func (a *App) resetStock(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return

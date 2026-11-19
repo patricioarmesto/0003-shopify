@@ -1,17 +1,24 @@
+-- init.sql corre una sola vez, cuando el volumen de Postgres está vacío.
+-- Define la fuente de verdad del ejercicio: stock, órdenes e idempotencia.
 CREATE TABLE IF NOT EXISTS products (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
     price_cents INTEGER NOT NULL CHECK (price_cents > 0),
+    -- El CHECK impide stock negativo incluso si alguien escribe a mano.
     stock INTEGER NOT NULL CHECK (stock >= 0),
     emoji TEXT NOT NULL DEFAULT '📦'
 );
 
 CREATE TABLE IF NOT EXISTS orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- El UNIQUE es el respaldo definitivo contra el doble click: aunque dos
+    -- réplicas pasen el mutex local, Postgres permite una sola orden por clave.
     idempotency_key TEXT NOT NULL UNIQUE,
     user_id TEXT NOT NULL,
     product_id INTEGER NOT NULL REFERENCES products(id),
+    -- Nombre denormalizado: la orden debe recordar qué se compró aunque luego
+    -- cambie el catálogo. Evita un JOIN para mostrar el panel de órdenes.
     product_name TEXT NOT NULL,
     qty INTEGER NOT NULL CHECK (qty > 0),
     total_cents INTEGER NOT NULL,
@@ -27,8 +34,13 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- El panel pide las últimas 100 órdenes ordenadas por fecha; sin este índice
+-- Postgres ordenaría la tabla completa en cada polling de 1 segundo.
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders (created_at DESC);
 
+-- El producto 1 arranca con stock 10 a propósito: es el que usa la prueba de
+-- carga de 100 usuarios. Los demás tienen stock distinto para que el catálogo
+-- no parezca un fixture uniforme.
 INSERT INTO products (id, name, description, price_cents, stock, emoji) VALUES
     (1,  'Steam Deck OLED',      'Consola portátil 512 GB',        56999, 10, '🎮'),
     (2,  'Teclado Mecánico',     'Switches marrones, 87 teclas',   14999, 24, '⌨️'),
@@ -42,5 +54,7 @@ INSERT INTO products (id, name, description, price_cents, stock, emoji) VALUES
     (10, 'Lámpara de Escritorio','Luz cálida/fría regulable',       6999, 27, '💡')
 ON CONFLICT (id) DO NOTHING;
 
+-- Los IDs se insertaron explícitamente, así que hay que mover el secuenciador;
+-- si no, el próximo INSERT chocaría con el producto 1.
 SELECT setval(pg_get_serial_sequence('products', 'id'),
               COALESCE((SELECT MAX(id) FROM products), 1));

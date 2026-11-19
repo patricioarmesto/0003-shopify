@@ -14,13 +14,18 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-// keyLocks serializes checkouts with the same Idempotency-Key inside this
-// process. The UNIQUE constraint in Postgres is the cross-replica backstop.
+// keyLocks serializa dentro de este proceso los checkouts que comparten una
+// Idempotency-Key. Es lo que hace que el doble click devuelva una sola orden:
+// el segundo request espera a que el primero termine y encuentra la clave ya
+// guardada. No alcanza con varias réplicas: para ese caso está el UNIQUE de
+// Postgres, que se comprueba más abajo como respaldo.
 type keyLocks struct {
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
 }
 
+// get devuelve un mutex por clave, no uno global. Así los checkouts de
+// usuarios distintos siguen ocurriendo en paralelo durante el pico.
 func (k *keyLocks) get(key string) *sync.Mutex {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -52,6 +57,11 @@ type CheckoutResponse struct {
 	Idempotent bool   `json:"idempotent,omitempty"`
 }
 
+// checkout es el corazón del ejercicio. El orden importa: primero se busca la
+// clave, luego se valida la reserva, después se cobra y al final se escribe
+// todo en una transacción. Mover un paso cambia las garantías: cobrar antes de
+// reservar cobraría sin stock, y escribir antes de cobrar dejaría órdenes de
+// pagos rechazados.
 func (a *App) checkout(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -80,7 +90,9 @@ func (a *App) checkout(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// 1. Idempotency gate: a completed key always replays the stored response.
+	// 1. Si la clave ya terminó, se devuelve la respuesta guardada palabra por
+	// palabra. No se vuelve a descontar stock ni se vuelve a cobrar. La cabecera
+	// X-Idempotent-Replay existe para que el estudiante vea que hubo replay.
 	var stored []byte
 	err := a.db.QueryRowContext(ctx,
 		`SELECT response FROM idempotency_keys WHERE key = $1`, key).Scan(&stored)
@@ -96,7 +108,9 @@ func (a *App) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Validate active reservation and read the price from Postgres.
+	// 2. Sin reserva activa no se cobra. El precio se lee acá para calcular el
+	// total del pago mock, pero se vuelve a leer dentro de la transacción:
+	// entre el cobro y el COMMIT otro request pudo cambiar el catálogo.
 	product, err := a.getProduct(ctx, req.ProductID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "product not found")
@@ -117,7 +131,10 @@ func (a *App) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	totalCents := product.PriceCents * req.Qty
 
-	// 3. Mock payment: 500ms latency, 5% failures.
+	// 3. El pago tarda 500 ms y falla el 5 % de las veces. Si falla se libera la
+	// reserva para que ese stock vuelva a estar disponible y se publica
+	// payment_failed. No se guarda clave de idempotencia: no hubo cobro ni orden,
+	// así que reintentar con la misma clave es legítimo tras reservar de nuevo.
 	result := a.payment.Charge(key, totalCents)
 	if !result.OK {
 		if err := a.releaseReservation(ctx, ref); err != nil {
@@ -139,7 +156,10 @@ func (a *App) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Atomic stock decrement + order + idempotency record in one transaction.
+	// 4. Descuento de stock, orden y registro de idempotencia entran en la MISMA
+	// transacción. Si algo falla hay rollback: no queda ni stock descontado ni
+	// orden huérfana. El WHERE stock >= qty evita vender de más aunque cien
+	// requests lleguen al mismo tiempo.
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		serverError(w, err)
@@ -187,6 +207,9 @@ func (a *App) checkout(w http.ResponseWriter, r *http.Request) {
 		Scan(&order.ID, &order.CreatedAt)
 	if err != nil {
 		_ = tx.Rollback()
+		// Respaldo entre réplicas: dos procesos pueden pasar el mutex local y el
+		// SELECT previo al mismo tiempo. El UNIQUE de Postgres decide y el que
+		// pierde devuelve la orden que ya existe.
 		if pqUniqueViolation(err) {
 			existing, findErr := a.orderByKey(ctx, key)
 			if findErr != nil {
@@ -222,6 +245,10 @@ func (a *App) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Confirmado el COMMIT: la reserva ya no sirve, la caché del catálogo hay
+	// que invalidarla para que se vea el stock nuevo, y se publica el evento.
+	// Publicar DESPUÉS del commit deja una ventana de fallo; ADR-005 explica por
+	// qué se acepta en este ejercicio.
 	_ = a.releaseReservation(ctx, ref)
 	a.invalidateProductsCache(ctx)
 	a.publish(ctx, topicOrderCreated, order.ID, SaleEvent{
@@ -299,7 +326,8 @@ func (a *App) publish(ctx context.Context, topic, key string, value any) {
 		Value: payload,
 	})
 	if err != nil {
-		// Documented trade-off: no transactional outbox in this exercise.
+		// Si Kafka no responde, sólo queda el log: la orden ya está confirmada.
+		// No hay transactional outbox en este ejercicio (ver ADR-005).
 		log.Printf("publish %s (key=%s): %v", topic, key, err)
 		return
 	}

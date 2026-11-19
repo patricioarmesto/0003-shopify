@@ -20,6 +20,9 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+// main.go arma el proceso con dos responsabilidades: la API HTTP y el worker
+// que consume order_created. Ambas viven en la misma imagen Docker y se eligen
+// con el flag -worker, para que el ejercicio corra con un solo docker compose up.
 const (
 	productsCacheKey   = "products:list"
 	productsCacheTTL   = 30 * time.Second
@@ -69,8 +72,9 @@ func main() {
 	runAPI(context.Background())
 }
 
-// flagWorker keeps main.go dependency-light while still allowing the same
-// image to run as the API or as the Kafka -> ClickHouse order worker.
+// flagWorker detecta el modo sin importar librerías de flags. La misma imagen
+// sirve para la API y para el worker Kafka -> ClickHouse; el Compose decide con
+// command: ["/app/server", "-worker"].
 func flagWorker() bool {
 	for _, arg := range os.Args[1:] {
 		if arg == "-worker" || arg == "--worker" {
@@ -127,6 +131,10 @@ func newKafkaWriter() *kafka.Writer {
 	}
 }
 
+// newKafkaReader configura CommitInterval: 0 para hacer commit manual. Esa es
+// la diferencia entre at-most-once y at-least-once: sólo se confirma el offset
+// después de insertar en ClickHouse. Si el worker muere en el medio, Kafka
+// reentrega el evento y el gráfico no pierde la venta.
 func newKafkaReader() *kafka.Reader {
 	return kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        strings.Split(env("KAFKA_BROKERS", "localhost:9092"), ","),
@@ -156,6 +164,8 @@ func runAPI(ctx context.Context) {
 	})
 	mux.HandleFunc("/api/products", app.listProducts)
 	mux.HandleFunc("/api/cart/reserve", app.reserveProduct)
+	// El reset no se registra por defecto: no es que devuelva 403, es que la
+	// ruta no existe. Ver ENABLE_DEV_ENDPOINTS en docker-compose.yml.
 	if env("ENABLE_DEV_ENDPOINTS", "false") == "true" {
 		mux.HandleFunc("/api/dev/reset", app.resetStock)
 	}
@@ -170,9 +180,10 @@ func runAPI(ctx context.Context) {
 	}
 }
 
-// runWorker is the logical Order Service: it consumes order_created and
-// writes the analytical projection into ClickHouse. At-least-once delivery is
-// intentional; the MergeTree table tolerates duplicates via its order key.
+// runWorker es el Order Service lógico: consume order_created y escribe la
+// proyección analítica en ClickHouse. La entrega at-least-once es intencional;
+// la tabla usa ReplacingMergeTree por order_id y la consulta usa FINAL para que
+// un redelivery no cuente dos veces la misma venta.
 func runWorker(ctx context.Context) {
 	reader := newKafkaReader()
 	ch := newClickHouseClient()
@@ -193,7 +204,8 @@ func runWorker(ctx context.Context) {
 			continue
 		}
 		if err := ch.InsertSale(ctx, event); err != nil {
-			// No commit: Kafka will redeliver this message.
+			// Sin commit: Kafka volverá a entregar el evento. Es el precio de
+			// no perder ventas si el worker muere antes del insert.
 			log.Printf("insert sale %s: %v", event.OrderID, err)
 			time.Sleep(500 * time.Millisecond)
 			continue
@@ -255,6 +267,9 @@ func (c clickHouseClient) InsertSale(ctx context.Context, event SaleEvent) error
 	return err
 }
 
+// Sales agrupa por minuto para el gráfico. FINAL es obligatorio: sin él, un
+// redelivery de Kafka dejaría dos filas con el mismo order_id y el total de
+// órdenes y facturación saldría inflado.
 func (c clickHouseClient) Sales(ctx context.Context) ([]SalePoint, error) {
 	query := `SELECT toStartOfMinute(created_at) AS minute,
 	                 count() AS orders,
@@ -337,7 +352,9 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
-// pqUniqueViolation reports whether err is a Postgres UNIQUE constraint error.
+// pqUniqueViolation detecta el código 23505 de Postgres. Es la última red:
+// aunque dos réplicas pasen el mutex local, el UNIQUE de orders permite una
+// sola orden por Idempotency-Key.
 func pqUniqueViolation(err error) bool {
 	var pqErr *pq.Error
 	return errors.As(err, &pqErr) && string(pqErr.Code) == "23505"
